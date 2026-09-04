@@ -1,0 +1,33 @@
+Package: viroscape
+Title: Ecological Predictors of Viral Genetic Divergence
+Version: 0.5.2
+Authors@R: c(
+    person("Frederick", "Au", email = "frederickau87@gmail.com",
+           role = c("aut", "cre")),
+    person("Samantha", "Buchan", role = "ctb"))
+Description: A reproducible platform for quantifying the relationship between
+    ecological, land-use and climate variables and viral genetic divergence.
+    Implements the full pipeline used in Au & Buchan (2026) for H5Nx
+    haemagglutinin in Southeast Asia: sequence retrieval, alignment, consensus
+    construction, substitution-model selection by information criterion,
+    divergence-from-consensus at amino acid or nucleotide level, environmental
+    data joining, and forward stepwise regression with collinearity and
+    coefficient-stability guards. Includes a Shiny front-end for interactively
+    swapping regions, distance metrics, substitution models and predictor sets.
+License: MIT + file LICENSE
+Encoding: UTF-8
+Depends: R (>= 4.1)
+Imports: ape, phangorn, stats, utils, tools, methods, tibble, dplyr,
+        tidyr, rlang, cli, jsonlite, ggplot2
+Suggests: lme4, car, sandwich, clubSandwich, nlme, rentrez, msa,
+        DECIPHER, Biostrings, shiny, bslib, DT, patchwork, targets,
+        testthat (>= 3.0.0), knitr, rmarkdown
+Config/testthat/edition: 3
+VignetteBuilder: knitr
+URL: https://github.com/frederickau/viroscape
+Config/roxygen2/version: 8.1.0
+NeedsCompilation: no
+Packaged: 2026-09-03 08:48:07 UTC; root
+Author: Frederick Au [aut, cre],
+  Samantha Buchan [ctb]
+Maintainer: Frederick Au <frederickau87@gmail.com>
