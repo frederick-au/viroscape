@@ -1,0 +1,385 @@
+---
+title: "Ecological predictors of viral divergence"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Ecological predictors of viral divergence}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>", fig.width = 7, fig.height = 4.2)
+```
+
+```{r setup}
+library(viroscape)
+library(ggplot2)
+```
+
+## The question
+
+Influenza A evolves fast, but the rate varies by orders of magnitude between
+places. Most models of that variation look inward: polymerase fidelity, host
+immunity, transmission bottlenecks. This package is built around the outward
+question instead. Does the ecological context a virus is circulating in predict
+how far its sequences have drifted?
+
+The response variable throughout is divergence from a regional consensus. The
+predictors are country-year environmental and land-use indicators. The output is
+a model that says which of them carry information once country identity and
+sampling year are controlled for.
+
+## The data
+
+The bundled example pairs simulated H5-like haemagglutinin proteins with real
+World Bank indicators for twelve countries. The sequences are generated *from*
+those indicators with planted effects - agricultural land positive, livestock
+index negative - so everything below recovers a construction. It exists to show
+what the interface does, not to say anything about influenza. Reports built from
+it carry a banner saying so.
+
+```{r}
+seqs <- example_sequences()
+seqs
+```
+
+Host is recovered from the strain name, which is what makes it possible to
+stratify by wild bird, domestic poultry and mammalian isolates.
+
+```{r}
+table(seqs$meta$host_class)
+```
+
+```{r}
+env <- example_environment()
+head(env[c("country", "year", "agricultural_land_pct", "livestock_index")])
+```
+
+## Alignment and the substitution model
+
+```{r}
+aln <- align_sequences(seqs, method = "none")   # already aligned
+aln
+```
+
+Genetic distance depends on the substitution matrix assumed, so the matrix is
+chosen rather than defaulted. Each candidate is fitted on the *same* fixed
+neighbour-joining tree, so only the matrix varies between them, and they are
+ranked by BIC.
+
+```{r}
+msel <- select_substitution_model(aln, criterion = "BIC")
+msel$table
+```
+
+BIC rather than AIC here: its penalty scales with alignment length, so it is
+the more conservative guard against an unnecessarily parameterised matrix.
+
+```{r}
+plot_model_selection(msel)
+```
+
+## Divergence from consensus
+
+```{r}
+cons <- build_consensus(aln)
+cons
+```
+
+```{r}
+dists <- distance_from_consensus(aln, cons, metric = "ml_aa", model = msel)
+dists
+```
+
+No molecular clock correction is applied. The aim is regression on
+environmental predictors rather than phylogenetic inference, and not assuming a
+strict clock keeps the metric robust to rate variation across lineages.
+
+Divergence from a consensus is emphatically *not* a rate, and it cannot be
+turned into one by dividing by elapsed years: the consensus is not an ancestor
+and the earliest cohort has no elapsed time to divide by. (Version 0.1.0 had a
+`clock_correct` argument that did exactly that. On data simulated under a
+perfectly constant rate it produced a strong, overwhelmingly significant
+*negative* association with year - it manufactured the artefact its name
+promised to remove. It has been removed and now raises an error.) If a rate is
+what you want, root a tree and regress root-to-tip distance on collection date:
+
+```{r}
+rate <- divergence_rate(aln, by = "country", model = msel)
+head(rate)
+```
+
+The slope is substitutions per site per year and the intercept implies a date
+for the root. Tips are not independent, so treat the standard errors as
+optimistic.
+
+Nucleotide metrics are available too, and recover the synonymous change that
+amino acid distances cannot see:
+
+```{r}
+distance_metrics()
+```
+
+## Joining the predictors
+
+```{r}
+ds <- join_environment(dists, env)
+ds
+```
+
+Sampling is deliberately uneven, as it is in the real deposition record. This
+is the plot to look at before trusting any country coefficient.
+
+```{r}
+plot_sampling(ds)
+```
+
+## The level the predictors live at
+
+This is the step that decides whether anything downstream means what it says.
+The response is measured per sequence. The predictors are country-year
+quantities, so every sequence from one country-year carries an identical
+predictor row, and those sequences are near-identical by descent as well.
+
+```{r}
+cluster_summary(ds)
+```
+
+The design effect is how many sequences it takes to carry the information of
+one independent observation. Every criterion computed per sequence - AIC, the
+GVIF, the likelihood ratio, `summary()`'s standard errors - is inflated by
+roughly that factor. On simulated data with **no** environmental effect at all,
+sequence-level forward selection retains at least one pure-noise predictor in
+100% of runs, and a mean of four and a half predictors out of seven.
+
+The fix is to model at the level the predictors vary at:
+
+```{r}
+mds <- aggregate_to_cluster(ds)
+mds
+```
+
+## Structural terms first
+
+Before any environmental predictor is considered, the country term has to be
+settled.
+
+```{r}
+st <- select_structure(mds, criterion = "AIC")
+st
+```
+
+Note that `year` is retained whether or not it improves the criterion.
+Divergence from a consensus accumulates with sampling date, so year confounds
+every predictor with a temporal trend: it earns its place by being a
+confounder, not by fitting well. Set `force_time = FALSE` for the older
+behaviour, which dropped it whenever it failed to improve AIC by 2.
+
+A random intercept is the more natural specification, but its variance
+component is only reliable with roughly ten or more groups. The example has
+twelve, so it is a legitimate option here; the five-country design of the
+original study was not. `select_structure()` warns when you are below that.
+
+## Forward selection
+
+```{r}
+sel <- forward_select(mds, base_terms = st, criterion = "AIC", verbose = FALSE)
+sel
+```
+
+Two things are worth reading out of that step log.
+
+The first is why AIC is used inside a round rather than a likelihood ratio
+test. Candidates within a round are not nested in one another, and the
+likelihood ratio statistic only follows its chi-squared null distribution under
+nesting.
+
+The second is how collinearity is treated. A high GVIF that comes from
+structural correlation with the country factor is a different problem from
+redundancy between two predictors, so by default an exceedance is recorded but
+does not reject a candidate on its own. What rejects a candidate is
+destabilisation: a coefficient changing sign *and* losing significance, or a
+significant non-grouping coefficient shifting by more than the threshold and by
+more than one standard error.
+
+```{r}
+plot_selection_path(sel)
+```
+
+## Calibrating the search
+
+Aggregating fixes the pseudoreplication. It does not fix the search. Seven
+candidates tested at `delta_threshold = -2` is roughly seven tests at alpha
+0.046, and on pure noise the cluster-level procedure still retains something in
+about a third of runs. The only honest way to read a delta is against the
+distribution of deltas the same search produces when the predictors are known
+to be meaningless.
+
+```{r}
+cal <- calibrate_selection(mds, base_terms = st, criterion = "AIC", B = 199, seed = 1)
+cal
+```
+
+Whole country-year predictor vectors are reassigned to other country-years, so
+the clustering and the collinearity of the real data survive the permutation
+and only the association with divergence is destroyed. Note how much larger
+than 2 the honest 5% threshold is.
+
+Attach it to the selection and it is reported alongside the step log, so a
+delta is never shown without the null it should be read against:
+
+```{r}
+sel <- forward_select(mds, base_terms = st, criterion = "AIC",
+                      calibration = cal, verbose = FALSE)
+```
+
+You do not have to remember to do this. `forward_select()` calibrates by
+default, and when the calibrated threshold is stricter than `delta_threshold` it
+is the one the search uses - so the honest threshold is applied during
+selection, not offered afterwards to whoever reads the warning:
+
+```{r}
+forward_select(mds, base_terms = st, criterion = "AIC", verbose = TRUE)$thresholds
+```
+
+## Validation
+
+The models along the selection path are nested, so a likelihood ratio statistic
+can be computed - but the terms were chosen on the same data, by searching, so
+the statistic does not have its chi-squared null distribution. The p-values are
+anti-conservative and are labelled `nominal_p` to keep that visible. They
+describe the fitted path; they are not evidence against a null hypothesis.
+
+```{r}
+lrt_chain(sel)
+```
+
+```{r}
+gvif_table(sel$model)
+```
+
+```{r}
+plot_gvif(sel)
+```
+
+```{r}
+plot_coefficients(sel)
+```
+
+## Did it recover the truth?
+
+The example data was generated with a known ground truth: agricultural land
+positive, livestock index negative, plus a temporal trend. So the answer is
+checkable.
+
+```{r}
+co <- tidy_coefficients(sel)
+co[co$term %in% c("agricultural_land_pct", "livestock_index", "year"), ]
+```
+
+Two things about that table. The standard errors are cluster-robust, not
+model-based. And the `unit` column is there because `join_environment()`
+standardises predictors by default, so those coefficients are per standard
+deviation of the predictor rather than per percentage point of agricultural
+land - a distinction that is easy to lose between the analysis and the write-up.
+`unscale()` converts:
+
+```{r}
+unscale(co)[co$term %in% c("agricultural_land_pct", "livestock_index"), ]
+```
+
+## The tree is a confounder too
+
+Country-year clustering is not the only structure in the data. Sequences in the
+same lineage share their history, so an environmental coefficient that survives
+country, year and clustering may still be a lineage effect wearing a country's
+clothes - lineages are not distributed evenly across countries, and divergence
+from a consensus is exactly the kind of response that inherits phylogenetic
+correlation.
+
+`assign_clades()` cuts the tree into monophyletic groups, and clade can then be
+used like any other grouping variable:
+
+```{r}
+tree <- build_tree(aln, model = msel)
+clades <- assign_clades(aln, k = 6, tree = tree)
+table(clades)
+```
+
+The bundled example has almost no lineage structure to find, because each
+simulated sequence is drawn independently from a single ancestor. That is a
+property of the example, not a limitation of the method: on data with real
+lineages, `cluster_summary(add_clades(ds, clades, cluster = TRUE))` typically
+reports a higher ICC than country-year does.
+
+The first thing to do with a clade factor is put it in the model, either as a
+base term or as a random effect:
+
+```{r, eval = FALSE}
+ds_cl <- add_clades(ds, clades)
+forward_select(ds_cl, base_terms = c("country", "year", "clade"))
+```
+
+That is the primary tool, and it is the blunt one on purpose: a categorical
+term absorbs discrete lineage structure exactly. On simulated data whose
+divergence is driven entirely by six clades, with no environmental effect at
+all, a confounded predictor is correctly returned as null (p = 0.19) once clade
+is in the model.
+
+`phylo_gls()` is the secondary check. It fits the same regression under a
+covariance derived from the tree and prints each coefficient beside its
+ordinary least squares counterpart *and* beside the clade fit:
+
+```{r, eval = FALSE}
+phylo_gls(ds, tree, terms = c("year", "agricultural_land_pct", "livestock_index"))
+```
+
+Read `shrinkage_pgls` before `p_pgls`. A coefficient that loses most of its
+magnitude once the tree is in the model has been explained by descent whatever
+its p-value says - and where the two corrections disagree, believe the clade
+column. Brownian and Pagel structures spread covariance smoothly along branch
+lengths, so they approximate block structure rather than absorbing it, and
+discrete clades are block structure. `print()` says so when it happens.
+
+## Where the confounding bites
+
+Restricting to the five countries of the original study reproduces the problem
+that paper had to reason around: country identity and country-level predictors
+can no longer be separated.
+
+```{r}
+sea <- names(sea_countries())
+seqs_sea <- filter_sequences(seqs, countries = sea)
+aln_sea <- align_sequences(seqs_sea, method = "none")
+d_sea <- distance_from_consensus(aln_sea, metric = "ml_aa", model = "JTT")
+ds_sea <- join_environment(d_sea, env)
+ds_sea
+```
+
+```{r}
+sel_sea <- forward_select(aggregate_to_cluster(ds_sea),
+                          base_terms = c("country", "year"), verbose = FALSE)
+sel_sea$steps[c("round", "predictor", "delta", "gvif_scaled", "accepted")]
+```
+
+With five groups the GVIF on land-use predictors inflates sharply, and whatever
+survives has to be read as an association rather than an independent effect.
+Widening the panel is not a nicety; it is what makes the coefficients mean what
+they appear to mean.
+
+## Reproducibility
+
+For a full run, use the `targets` pipeline rather than calling the functions by
+hand. Every stage is a node, so changing the metric or a threshold reruns only
+what depends on it.
+
+```r
+targets::tar_make()
+targets::tar_visnetwork()
+```
+
+## Interactively
+
+```r
+launch_app()
+```
